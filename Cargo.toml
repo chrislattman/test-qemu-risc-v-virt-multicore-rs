@@ -1,0 +1,23 @@
+[package]
+name = "test-qemu-risc-v-virt-multicore-rs"
+version = "0.1.0"
+edition = "2024"
+default-run = "core0"
+
+# One image per hart, each linked into its own private region (see build.rs)
+[[bin]]
+name = "core0"
+path = "core0.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "core1"
+path = "core1.rs"
+test = false
+bench = false
+
+[dependencies]
+riscv = "0.16.1"
+riscv-peripheral = "0.5.1"
+uart_16550 = "0.9.0"
