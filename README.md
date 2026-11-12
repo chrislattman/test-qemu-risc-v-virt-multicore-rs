@@ -1,6 +1,6 @@
 # no_std Rust example for QEMU RISC-V "virt" machine with two harts (RV64IMAC)
 
-The Rust counterpart of [test-qemu-risc-v-virt-multicore](../test-qemu-risc-v-virt-multicore), and a two-hart version of [test-qemu-risc-v-virt-rs](../test-qemu-risc-v-virt-rs). Each hart runs its own image from its own private 2 MB region of RAM, and locks its own PMP (Physical Memory Protection, RISC-V's MPU) so it can only access its own region, a shared region and the devices it uses. If either hart touches the other hart's region, it gets an access fault, even in machine mode.
+Each hart runs its own image from its own private 2 MB region of RAM, and locks its own PMP (Physical Memory Protection, RISC-V's MPU) so it can only access its own region, a shared region and the devices it uses. If either hart touches the other hart's region, it gets an access fault, even in machine mode.
 
 - Hart 0 owns the UART and the PLIC (through the `uart_16550` and `riscv-peripheral` crates, as in the single-hart version). It runs the same Hello/World loop and interrupt cascade, starts hart 1, and prints hart 1's messages.
 - Hart 1 uses no peripherals except the CLINT timer. It posts a message to a mailbox in the shared region every 3 seconds, and hart 0 prints it after each loop iteration (every 2 seconds), so hart 1's messages can appear up to 2 seconds late.
@@ -58,6 +58,5 @@ The addresses are defined once, in `memory_map.rs`. Both images use it as a modu
 
 ## Notes
 
-- See [test-qemu-risc-v-virt-rs](../test-qemu-risc-v-virt-rs) for how the crates map to the Arm version
 - Serial output is lost until a telnet client connects; change `wait=off` to `wait=on` in `qemu.sh` to make QEMU wait for the connection before starting
 - `-bios none` skips OpenSBI, so the program runs in machine mode starting at the RAM base 0x80000000. `core0` is passed straight to `-kernel` as an ELF, so QEMU loads it at its linked address and jumps to `_start`
