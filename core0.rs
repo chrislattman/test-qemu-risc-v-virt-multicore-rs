@@ -10,7 +10,6 @@ mod memory_map;
 mod pmp;
 
 use common::{CLINT_BASE, Clint, Mailbox, describe_fault};
-use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::fmt::{self, Write};
 use core::num::NonZeroUsize;
@@ -61,8 +60,6 @@ const MCAUSE_INTERRUPT: usize = 1 << 63;
 const IRQ_M_SOFT: usize = 3; // Machine software interrupt (CLINT MSIP)
 const IRQ_M_EXT: usize = 11; // Machine external interrupt (PLIC)
 
-const MSTATUS_MIE: usize = 1 << 3;
-
 // Shared variable across foreground code and async ISR layers
 static SHARED_DATA: AtomicU32 = AtomicU32::new(0);
 
@@ -79,13 +76,12 @@ impl<T> IrqShared<T> {
         Self(UnsafeCell::new(value))
     }
 
-    /// Runs `f` with interrupts masked, then restores the previous mask (so it's safe inside
-    /// handle_trap). `f` must not call `with` on the same value again.
+    /// Runs `f` with interrupts masked, then restores the previous mstatus.MIE. Inside a trap
+    /// handler interrupts are already masked, and unconditionally re-enabling them would allow a
+    /// nested trap that overwrites mepc/mcause before the handler returns, so this is safe inside
+    /// handle_trap. `f` must not call `with` on the same value again.
     fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
-        let prev = irq_save();
-        let result = f(unsafe { &mut *self.0.get() });
-        irq_restore(prev);
-        result
+        riscv::interrupt::free(|| f(unsafe { &mut *self.0.get() }))
     }
 }
 
@@ -117,36 +113,6 @@ static UART: IrqShared<Uart> = IrqShared::new(Uart::new());
 
 fn uart_puts(s: &str) {
     UART.with(|uart| uart.write_str(s).unwrap());
-}
-
-// No `nomem` option, so these also act as compiler memory barriers
-fn enable_interrupts() {
-    unsafe {
-        asm!("csrs mstatus, {}", in(reg) MSTATUS_MIE, options(nostack));
-    }
-}
-
-fn disable_interrupts() {
-    unsafe {
-        asm!("csrc mstatus, {}", in(reg) MSTATUS_MIE, options(nostack));
-    }
-}
-
-/// Masks interrupts and returns the previous mstatus.MIE, so it can be restored with irq_restore.
-/// Inside a trap handler interrupts are already masked, and unconditionally re-enabling them would
-/// allow a nested trap that overwrites mepc/mcause before the handler returns.
-fn irq_save() -> usize {
-    let prev: usize;
-    unsafe {
-        asm!("csrrc {}, mstatus, {}", out(reg) prev, in(reg) MSTATUS_MIE, options(nostack));
-    }
-    prev & MSTATUS_MIE
-}
-
-fn irq_restore(prev: usize) {
-    unsafe {
-        asm!("csrs mstatus, {}", in(reg) prev, options(nostack));
-    }
 }
 
 /// "Hardware" interrupt: a real device interrupt through the PLIC. Unlike the GIC, the PLIC has no
@@ -208,21 +174,19 @@ pub extern "C" fn handle_trap(mcause: usize, mtval: usize, mepc: usize) {
             "[ISR] 'Software' Interrupt tripped! Processing data inside a Critical Section...\r\n",
         );
 
-        // --- CRITICAL SECTION BEGIN ---
-        let prev = irq_save(); // Lock out incoming requests safely
-        let local_copy = SHARED_DATA.load(Ordering::Relaxed);
+        // Critical section: lock out incoming requests safely
+        riscv::interrupt::free(|| {
+            let local_copy = SHARED_DATA.load(Ordering::Relaxed);
 
-        // Print proof of successful read
-        UART.with(|uart| {
-            write!(
-                uart,
-                "      Critical Read complete! Value is: 0x{local_copy:08X}\r\n"
-            )
-            .unwrap()
+            // Print proof of successful read
+            UART.with(|uart| {
+                write!(
+                    uart,
+                    "      Critical Read complete! Value is: 0x{local_copy:08X}\r\n"
+                )
+                .unwrap()
+            });
         });
-
-        irq_restore(prev);
-        // --- CRITICAL SECTION END ---
     }
 }
 
@@ -270,7 +234,9 @@ pub extern "C" fn main_app() -> ! {
     #[cfg(not(debug_assertions))]
     {
         plic_init();
-        enable_interrupts(); // Set mstatus.MIE to take machine-mode interrupts
+        // Set mstatus.MIE to take machine-mode interrupts
+        // SAFETY: plic_init has set up every interrupt source that handle_trap expects
+        unsafe { riscv::interrupt::enable() };
     }
     loop {
         uart_puts("Hello\r\n");
@@ -290,7 +256,7 @@ pub extern "C" fn main_app() -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    disable_interrupts();
+    riscv::interrupt::disable();
     // Take over the UART rather than going through UART.with, since the panic may have
     // happened inside it. This never returns, so the interrupted access is never resumed.
     let mut uart = Uart::new();
